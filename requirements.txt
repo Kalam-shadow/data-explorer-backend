@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+duckdb
+python-multipart
+requests
+dotenv
+google-genai
