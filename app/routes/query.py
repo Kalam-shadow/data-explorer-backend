@@ -58,7 +58,7 @@ def query(request: QueryRequest):
             detail="Generated SQL is invalid or not a SELECT query"
         )
 
-    logger.info("Generated SQL: %s", sql)
+    # logger.info("Generated SQL: %s", sql)
 
     # 5. Execute SQL safely
     try:
