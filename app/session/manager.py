@@ -1,8 +1,10 @@
 import duckdb
 import uuid
+import time
 
 _sessions = {}
 
+SESSION_TTL = 30 * 60  # 30 minutes
 def create_session():
     session_id = str(uuid.uuid4())
     conn = duckdb.connect(":memory:")
@@ -11,12 +13,26 @@ def create_session():
         "table": None,
         "schema": None,
         "df": None,       # optional: keep DataFrame copy
-        "file_path": None # optional: if you save to disk
+        "file_path": None, # optional: if you save to disk
+        "created_at": time.time(),
+        "last_access": time.time()
     }
     return session_id
 
+# def get_session(session_id: str):
+#     return _sessions.get(session_id)
 def get_session(session_id: str):
-    return _sessions.get(session_id)
+    session = _sessions.get(session_id)
+    if not session:
+        return None
+
+    if time.time() - session["last_access"] > SESSION_TTL:
+        delete_session(session_id)
+        return None
+
+    session["last_access"] = time.time()
+    return session
+
 
 def store_metadata(session_id: str, table: str, schema: dict, df=None, file_path=None):
     if session_id in _sessions:

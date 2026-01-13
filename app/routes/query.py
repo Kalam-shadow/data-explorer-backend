@@ -78,6 +78,27 @@ def query(request: QueryRequest):
         # "columns": list(schema.keys())
     }
 
+@router.get("/session/{session_id}")
+def validate_session(session_id: str):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session expired")
+
+    if not session["table"] or not session["schema"]:
+        return {
+            "valid": False,
+            "reason": "incomplete"
+        }
+
+    return {
+        "valid": True,
+        "sessionId": session_id,
+        "table": session["table"],
+        "schema": session["schema"],
+        "rowCount": session["conn"].execute(
+            f"SELECT COUNT(*) FROM {session['table']}"
+        ).fetchone()[0]
+    }
 
 
 # from datetime import datetime, timezone
