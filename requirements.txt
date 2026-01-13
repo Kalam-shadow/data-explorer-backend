@@ -6,3 +6,4 @@ python-multipart
 requests
 dotenv
 google-genai
+gunicorn
