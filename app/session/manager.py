@@ -11,6 +11,7 @@ def create_session():
     _sessions[session_id] = {
         "conn": conn,
         "table": None,
+        "schema_db": None,
         "schema": None,
         "df": None,       # optional: keep DataFrame copy
         "file_path": None, # optional: if you save to disk
@@ -34,10 +35,11 @@ def get_session(session_id: str):
     return session
 
 
-def store_metadata(session_id: str, table: str, schema: dict, df=None, file_path=None):
+def store_metadata(session_id: str, table: str, schema_db: dict, schema: dict, df=None, file_path=None):
     if session_id in _sessions:
         _sessions[session_id]["table"] = table
         _sessions[session_id]["schema"] = schema
+        _sessions[session_id]["schema_db"] = schema_db
         _sessions[session_id]["df"] = df
         _sessions[session_id]["file_path"] = file_path
 

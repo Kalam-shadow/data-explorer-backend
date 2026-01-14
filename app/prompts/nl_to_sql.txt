@@ -29,6 +29,12 @@ Allowed table:
 Allowed columns (use ONLY these, exactly as written):
 {columns}
 
+schema from duckDB (for reference):
+{schema_db}
+
+schema from pandas (for reference):
+{schema}
+
 Example:
 SELECT "Education Level", AVG("Salary") FROM data GROUP BY "Education Level";
 

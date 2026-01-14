@@ -27,6 +27,7 @@ def query(request: QueryRequest):
 
     conn = session.get("conn")
     table = session.get("table")
+    schema_db = session.get("schema_db")
     schema = session.get("schema")
 
     if not conn or not table or not schema:
@@ -44,7 +45,9 @@ def query(request: QueryRequest):
     prompt = (
         template.format(
             table=table,
-            columns=quoted_columns
+            columns=quoted_columns,
+            schema_db=schema_db,
+            schema=schema
         )
         + f"\nQuestion: {request.question}"
     )
