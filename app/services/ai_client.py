@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # New: OpenRouter configuration (uses GEMINI_KEY from .env per your request)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-coder:free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it:free")
 
 def generate_sql(prompt: str) -> str:
     """
@@ -39,35 +39,41 @@ def generate_sql(prompt: str) -> str:
     # provider = os.getenv("AI_PROVIDER", "GEMINI").upper()
 
     api_key = os.getenv("OPENROUTER_KEY")
+    print("API KEY:", api_key[:10], "...", len(api_key))
     if not api_key:
         raise ValueError("OPENROUTER key not set in env var")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "http://localhost:8080",  # Optional: identify your app in the request
+        "X-Title": "Data Explorer SQL Generation",  # Optional: custom header for better logging/analytics in OpenRouter
         "Content-Type": "application/json",
         # Optional headers for openrouter rankings/metadata can be set via env if needed
     }
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model":OPENROUTER_MODEL,
         "messages": [
+            {"role": "system", "content": "You are a helpful SQL assistant that generates valid SQL queries based on user prompts."},
             {"role": "user", "content": prompt}
-        ]
+        ],
+        "temperature": 0.2,
     }
     try:
         resp = requests.post(
             OPENROUTER_URL,
             headers=headers,
-            data=json.dumps(payload),
+            json = payload,
             timeout=60
         )
         resp.raise_for_status()
         data = resp.json()
+        #logger.info("OpenRouter response data: %s", data)
+
     except requests.exceptions.Timeout: 
         raise RuntimeError("OpenRouter request timed out after 60s") 
     except requests.exceptions.RequestException as e: 
         raise RuntimeError(f"OpenRouter request failed: {e}")
     
-    # logger.info("OpenRouter response data: %s", data)
 
     # Robust extraction for various possible response shapes
     text = None

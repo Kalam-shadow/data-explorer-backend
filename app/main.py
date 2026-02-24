@@ -1,10 +1,13 @@
 from fastapi import FastAPI
-from app.routes import upload, query, exit
+from app.routes import upload, query, exit, health
 import os
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
+from app.middlewares.exception_handler import GlobalExceptionMiddleware
+from app.utils.logging_config import configure_logging
 
 load_dotenv()
+configure_logging()
 app = FastAPI()
 
 
@@ -22,6 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global exception handler middleware
+app.add_middleware(GlobalExceptionMiddleware)
+
 app.include_router(upload.router)
 app.include_router(query.router)
 app.include_router(exit.router)
+app.include_router(health.router)
