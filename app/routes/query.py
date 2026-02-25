@@ -70,15 +70,15 @@ def query(request: QueryRequest):
         logger.exception("SQL execution failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 6. Return consistent response
+    # 6. Return structured response including columns and timing
     return {
-        "data": result,
-        "rowCount": len(result),
+        "columns": result.get("columns", []),
+        "rows": result.get("rows", []),
+        "rowCount": result.get("rowCount", 0),
+        "columnCount": result.get("columnCount", 0),
+        "executionTimeMs": result.get("executionTimeMs", None),
         "query": sql,
         "executedAt": datetime.now(timezone.utc).isoformat(),
-        # "sessionId": request.session_id,
-        # "table": table,
-        # "columns": list(schema.keys())
     }
 
 @router.get("/session/{session_id}")

@@ -200,6 +200,130 @@ def _infer_schema(df: pd.DataFrame) -> Dict[str, str]:
 
     return schema
 
+def _expand_merged_cells(path, sheet_name=None):
+    """Expand merged cells in-place so downstream pandas reads repeated values.
+
+    Fills each merged range with the value from its top-left cell and saves
+    the workbook back to the same path. Non-fatal on error (logs and returns).
+    """
+    p = _ensure_path(path)
+    try:
+        wb = load_workbook(filename=str(p), data_only=True)
+        ws = wb[sheet_name] if sheet_name else wb.active
+
+        # Iterate over a copy of the ranges to avoid mutation issues
+        for merged_range in list(ws.merged_cells.ranges):
+            min_col, min_row, max_col, max_row = merged_range.bounds
+            value = ws.cell(row=min_row, column=min_col).value
+
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    ws.cell(row=row, column=col).value = value
+
+        wb.save(str(p))
+        wb.close()
+    except Exception as e:  # pragma: no cover - IO/runtime
+        logger.debug("Could not expand merged cells: %s", e)
+        return
+
+def _detect_header_block(path, sheet_name=None, max_scan_rows=20):
+    """Detect a header block start and depth (number of header rows).
+
+    Returns a tuple (header_start_index, header_depth). If no clear header
+    is found returns (0, 1).
+    """
+    df_raw = _read_single_sheet(path, sheet_name=sheet_name, header=None)
+    df_raw = df_raw.head(max_scan_rows)
+
+    # drop completely empty rows to avoid noise
+    df_raw = df_raw.dropna(how="all")
+
+    header_start = None
+    for idx, row in df_raw.iterrows():
+        non_null = [v for v in row if pd.notna(v)]
+        if not non_null:
+            continue
+        text_ratio = sum(isinstance(v, str) for v in non_null) / max(1, len(non_null))
+        if text_ratio > 0.6:
+            header_start = int(idx)
+            break
+
+    if header_start is None:
+        return 0, 1
+
+    # Check the next row to see if it's also header-like (multi-row header)
+    next_idx = header_start + 1
+    if next_idx < len(df_raw):
+        next_row = df_raw.iloc[next_idx]
+        non_null_next = [v for v in next_row if pd.notna(v)]
+        next_ratio = sum(isinstance(v, str) for v in non_null_next) / max(1, len(non_null_next))
+        if next_ratio > 0.5:
+            return header_start, 2
+
+    return header_start, 1
+
+
+def _is_subject_triplet_format(df: pd.DataFrame) -> bool:
+    """Return True if the first row looks like subject triplet sub-headers (Code/GR/GP).
+
+    Heuristic: the first row contains repeated tokens like 'gr', 'gp', 'code', or 'sub'.
+    Requires at least three matches to consider it a triplet layout.
+    """
+    try:
+        first_row = df.iloc[0].astype(str).str.lower()
+    except Exception:
+        return False
+
+    # normalize punctuation and whitespace for simpler matching
+    first_row = first_row.str.replace(r"[\.\#]", "", regex=True).str.strip()
+    matches = first_row.str.contains(r"\b(gr|gp|code|sub)\b", regex=True)
+    return int(matches.sum()) >= 3
+
+
+
+def _parse_subject_triplet(df_raw: pd.DataFrame, header_start: int = 0) -> Tuple[pd.DataFrame, List[List[Optional[str]]]]:
+    """Parse a DataFrame in the subject-triplet layout.
+
+    - Uses `header_start` row as sub-header (e.g., 'Sub #1', 'GR.', 'GP.')
+    - Combines each column's generated base name with the sub-header value
+      to form deterministic column identifiers.
+
+    Returns (parsed_df, original_header_rows)
+    """
+    # sub-header row
+    sub_header = df_raw.iloc[header_start].tolist()
+    data = df_raw.iloc[header_start + 1 :].reset_index(drop=True)
+
+    # Generate base column names (use existing df column labels if they are strings,
+    # otherwise fallback to positional names)
+    base_cols: List[str] = []
+    for c in df_raw.columns:
+        if isinstance(c, str) and c.strip():
+            base_cols.append(c)
+        else:
+            base_cols.append(f"col_{int(c)}")
+
+    new_cols: List[str] = []
+    for base, sub in zip(base_cols, sub_header):
+        if pd.isna(sub) or str(sub).strip() == "":
+            combined = base
+        else:
+            combined = f"{base}_{str(sub).strip()}"
+        nc = _normalize_col(combined)
+        if not nc:
+            nc = f"{base}"
+        new_cols.append(nc)
+
+    data.columns = new_cols
+
+    # build original header rows for metadata (single-row sub-header)
+    original_header_rows: List[List[Optional[str]]] = [[None if pd.isna(v) else str(v).strip() for v in sub_header]]
+
+    # drop fully-empty subject blocks (columns) conservatively
+    data = data.dropna(axis=1, how="all")
+
+    return data, original_header_rows
+
 
 # -----------------------------
 # Main Parser
@@ -220,26 +344,103 @@ def parse_excel(
     - Infers a simple schema for each column.
     """
     p = _ensure_path(path)
+    
+    # Expand merged cells first so pandas doesn't get NaNs for merged headers
+    _expand_merged_cells(p, sheet_name=sheet_name)
 
-    header_row = _detect_header_row(p, sheet_name=sheet_name, max_scan_rows=max_scan_rows)
-    df = _read_single_sheet(p, sheet_name=sheet_name, header=header_row)
+    # Quick preview: check for subject-triplet layout (Code/GR/GP per subject)
+    try:
+        preview = _read_single_sheet(p, sheet_name=sheet_name, header=0)
+        if _is_subject_triplet_format(preview):
+            # deterministic parsing for subject-triplet layout
+            df_parsed, original_header_rows = _parse_subject_triplet(preview, header_start=0)
 
-    # Drop completely empty rows/columns
+            # Remove hidden columns if any (index mapping applies to parsed df)
+            hidden_idx = _hidden_columns(p, sheet_name)
+            if hidden_idx:
+                cols_to_drop = [df_parsed.columns[i] for i in hidden_idx if 0 <= i < len(df_parsed.columns)]
+                if cols_to_drop:
+                    logger.debug("Dropping hidden columns (triplet mode): %s", cols_to_drop)
+                    df_parsed = df_parsed.drop(columns=cols_to_drop, errors="ignore")
+
+            # Normalize missing values and trim strings
+            df_parsed = df_parsed.where(pd.notnull(df_parsed), None)
+            for col in df_parsed.select_dtypes(include=[object]).columns:
+                df_parsed[col] = df_parsed[col].apply(lambda v: v.strip() if isinstance(v, str) else v)
+
+            # Required column check
+            missing: List[str] = []
+            if required_columns:
+                norm_required = [_normalize_col(c) for c in required_columns]
+                for orig, norm in zip(required_columns, norm_required):
+                    if norm not in df_parsed.columns:
+                        missing.append(orig)
+
+            schema = _infer_schema(df_parsed)
+
+            meta: Dict[str, Any] = {
+                "header_row": 0,
+                "header_depth": 1,
+                "original_header_rows": original_header_rows,
+                "columns": list(df_parsed.columns),
+                "row_count": len(df_parsed),
+                "schema": schema,
+                "missing_required": missing,
+            }
+
+            return df_parsed, meta
+    except Exception:
+        # if preview fails, fall back to normal detection
+        pass
+
+    # Detect header block (start row and depth)
+    header_start, header_depth = _detect_header_block(p, sheet_name=sheet_name, max_scan_rows=max_scan_rows)
+
+    # Read raw with no header so we can combine header rows ourselves
+    df = _read_single_sheet(p, sheet_name=sheet_name, header=None)
+
+    # Drop completely empty rows/columns from the raw sheet
     df = df.dropna(axis=0, how="all")
     df = df.dropna(axis=1, how="all")
 
     if df.empty:
         raise HTTPException(status_code=400, detail="No usable data found")
 
-    # Normalize columns
-    new_cols: List[str] = []
-    for idx, col in enumerate(df.columns):
-        nc = _normalize_col(col)
-        if not nc:
-            nc = f"col_{idx}"
-        new_cols.append(nc)
+    # If we detected a header block, combine header rows column-wise
+    if header_start is None:
+        header_start = 0
+        header_depth = 1
 
-    df.columns = new_cols
+    # ensure header indices are within bounds
+    max_row_index = len(df) - 1
+    if header_start > max_row_index:
+        header_start = 0
+        header_depth = 1
+
+    # Slice header rows and the data portion
+    header_rows = df.iloc[header_start : header_start + header_depth]
+    data = df.iloc[header_start + header_depth :].reset_index(drop=True)
+
+    # Combine headers column-wise into composite names
+    combined_headers: List[str] = []
+    num_cols = df.shape[1]
+    for col_idx in range(num_cols):
+        parts: List[str] = []
+        for r in range(header_rows.shape[0]):
+            try:
+                val = header_rows.iloc[r, col_idx]
+            except Exception:
+                val = None
+            if pd.notna(val) and str(val).strip():
+                parts.append(str(val).strip())
+        combined = "_".join(parts)
+        nc = _normalize_col(combined)
+        if not nc:
+            nc = f"col_{col_idx}"
+        combined_headers.append(nc)
+
+    data.columns = combined_headers
+    df = data
 
     # Remove hidden columns if any
     hidden_idx = _hidden_columns(p, sheet_name)
@@ -266,8 +467,19 @@ def parse_excel(
 
     schema = _infer_schema(df)
 
+    # capture original header rows for user preview
+    original_header_rows: List[List[Optional[str]]] = []
+    try:
+        for r in range(header_rows.shape[0]):
+            row_vals = [None if pd.isna(v) else str(v).strip() for v in header_rows.iloc[r].tolist()]
+            original_header_rows.append(row_vals)
+    except Exception:
+        original_header_rows = []
+
     meta: Dict[str, Any] = {
-        "header_row": header_row,
+        "header_row": header_start,
+        "header_depth": header_depth,
+        "original_header_rows": original_header_rows,
         "columns": list(df.columns),
         "row_count": len(df),
         "schema": schema,
@@ -277,4 +489,34 @@ def parse_excel(
     return df, meta
 
 
-__all__ = ["parse_excel", "_detect_header_row", "_hidden_columns"]
+def _split_tables(df: pd.DataFrame) -> List[pd.DataFrame]:
+    """Split a DataFrame into multiple tables separated by fully-empty rows.
+
+    Returns a list of DataFrames (each may need header handling).
+    """
+    tables: List[pd.DataFrame] = []
+    current_rows: List[pd.Series] = []
+
+    for _, row in df.iterrows():
+        if row.isna().all():
+            if current_rows:
+                tables.append(pd.DataFrame(current_rows))
+                current_rows = []
+        else:
+            current_rows.append(row)
+
+    if current_rows:
+        tables.append(pd.DataFrame(current_rows))
+
+    return tables
+
+
+__all__ = [
+    "parse_excel",
+    "_detect_header_row",
+    "_detect_header_block",
+    "_expand_merged_cells",
+    "_hidden_columns",
+    "_split_tables",
+]
+

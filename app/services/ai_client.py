@@ -39,7 +39,7 @@ def generate_sql(prompt: str) -> str:
     # provider = os.getenv("AI_PROVIDER", "GEMINI").upper()
 
     api_key = os.getenv("OPENROUTER_KEY")
-    print("API KEY:", api_key[:10], "...", len(api_key))
+    # print("API KEY:", api_key[:10], "...", len(api_key))
     if not api_key:
         raise ValueError("OPENROUTER key not set in env var")
 
